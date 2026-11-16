@@ -4,9 +4,13 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      owner:
+        description: "RubyGems account ID for the first publish (numeric, from Pending Trusted Publishers)"
+        required: false
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
 
 jobs:
@@ -20,4 +24,30 @@ jobs:
         with:
           bundler-cache: true
           ruby-version: "3.3"
-      - uses: rubygems/release-gem@v1
+
+      - name: Build gem
+        run: gem build transmitly.gemspec
+
+      - name: Exchange OIDC token for a RubyGems key
+        env:
+          OWNER_ID: ${{ inputs.owner }}
+        run: |
+          token=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rubygems.org" | jq -r .value)
+          if [ -n "$OWNER_ID" ]; then
+            body=$(jq -cn --arg jwt "$token" --arg owner "$OWNER_ID" '{jwt:$jwt,owner:$owner}')
+          else
+            body=$(jq -cn --arg jwt "$token" '{jwt:$jwt}')
+          fi
+          response=$(curl -sS -X POST https://rubygems.org/api/v1/oidc/trusted_publisher/exchange_token \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' -d "$body")
+          key=$(printf '%s' "$response" | jq -r '.rubygems_api_key // empty')
+          if [ -z "$key" ]; then
+            echo "$response"
+            exit 1
+          fi
+          echo "::add-mask::$key"
+          echo "GEM_HOST_API_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Push gem
+        run: gem push transmitly-*.gem
